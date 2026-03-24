@@ -754,7 +754,7 @@ async def cmd_joslist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(
-        "⏳ Running /joslist script now. This usually takes 2-3 minutes. "
+        "⏳ Running /joslist script now. This can take up to 10 minutes. "
         "I'll send an update when it finishes."
     )
 
@@ -1480,7 +1480,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*📊 Scanning*\n"
         "/scan — Intraday movers (no overnight gap)\n"
         "/gapup — Overnight gap-up scan\n"
-        "/joslist — Run Jo's tracker script (2-3 min)\n"
+        "/joslist — Run Jo's tracker script (up to 10 min)\n"
         "/tracked — Flagged stocks (Excel report)\n"
         "/debug — Score breakdown for any stock\n"
         "\n"
