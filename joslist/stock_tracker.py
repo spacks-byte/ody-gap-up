@@ -640,6 +640,7 @@ def main():
         tracker.close()
 
         print("\nDone!")
+        print("JOSLIST_DONE")
 
     except Exception as e:
         print(f"\nError: {e}")

@@ -744,6 +744,8 @@ async def cmd_joslist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     import subprocess
     import sys
 
+    completion_marker = "JOSLIST_DONE"
+
     script_dir = Path(__file__).resolve().parent.parent / "joslist"
     script_path = script_dir / "stock_tracker.py"
 
@@ -777,12 +779,24 @@ async def cmd_joslist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ /joslist script failed to start: {error}")
         return
 
-    if proc.returncode == 0:
+    stdout_text = proc.stdout or ""
+
+    if proc.returncode == 0 and completion_marker in stdout_text:
         await update.message.reply_text(
             "✅ /joslist script finished running.\n"
             "📄 Data is available here: "
             "https://docs.google.com/spreadsheets/d/1PiUuP3MNPPHUWVbLNQuPEWgABxa-8NNGiBpGG88EPEI/edit?gid=431873583#gid=431873583"
         )
+        return
+
+    if proc.returncode == 0 and completion_marker not in stdout_text:
+        output_tail = "\n".join((proc.stderr or stdout_text or "").splitlines()[-20:])
+        await update.message.reply_text(
+            "❌ /joslist ended without completion marker, so success was not confirmed.\n"
+            "Please check script output/logs and try again."
+        )
+        if output_tail:
+            await update.message.reply_text(f"Last output:\n{output_tail}")
         return
 
     output_tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-20:])
