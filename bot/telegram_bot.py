@@ -487,7 +487,7 @@ async def cmd_tracked(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                          if d.get('market') == MARKET}
 
         if not market_stocks:
-            await update.message.reply_text("No tracked movers.")
+            await update.message.reply_text("No tracked movers!")
             return
 
         # Fetch live prices
