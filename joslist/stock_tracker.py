@@ -31,7 +31,11 @@ WORKSHEET_TITLE = os.getenv("STOCK_TRACKER_WORKSHEET", "Prices").strip() or "Pri
 if GOOGLE_CREDENTIALS_FILE:
     credentials_path = Path(GOOGLE_CREDENTIALS_FILE)
     if not credentials_path.is_absolute():
-        credentials_path = BASE_DIR / credentials_path
+        # Prefer project root for repo-level secrets (e.g. hsi-turnover-auth.json),
+        # then fall back to joslist/ for local script-specific files.
+        root_candidate = PROJECT_ROOT / credentials_path
+        local_candidate = BASE_DIR / credentials_path
+        credentials_path = root_candidate if root_candidate.exists() else local_candidate
     GOOGLE_CREDENTIALS_FILE = str(credentials_path)
 
 missing_env_vars = []
