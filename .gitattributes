@@ -1,0 +1,35 @@
+# Normalize text files to LF in the repository.
+* text=auto eol=lf
+
+# Keep common source and config formats on LF.
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.env text eol=lf
+*.sh text eol=lf
+
+# Windows command scripts use CRLF for compatibility.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Treat common binaries as binary to avoid EOL conversion/diffs.
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.zip binary
+*.gz binary
+*.7z binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
