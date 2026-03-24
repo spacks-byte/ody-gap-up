@@ -19,3 +19,6 @@ tracked_movers.json
 
 # Caches
 .cache_webb/
+
+#Oauth Files
+hsi-turnover-auth.json
