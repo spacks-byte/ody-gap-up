@@ -1,0 +1,21 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+__pycache__/
+*.pyc
+
+# Runtime data files
+data/scan_history.json
+data/alert_log.json
+data/prev_day_turnover.json
+data/tracked_movers.json
+
+# Legacy locations (in case they reappear during dev)
+scan_history.json
+alert_log.json
+prev_day_turnover.json
+tracked_movers.json
+
+# Caches
+.cache_webb/

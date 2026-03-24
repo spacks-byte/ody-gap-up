@@ -1,0 +1,82 @@
+{
+  "HK.01442": {
+    "stock_code": "01442",
+    "stock_name": "INFINITY L&T",
+    "category": "Trading Halt",
+    "title": "(1) DELAY IN PUBLICATION OF ANNUAL RESULTS\nFOR THE YEAR ENDED 31 DECEMBER 2025;\n(2) DATE OF BOARD MEETING; AND\n(3) SUSPENSION OF TRADING",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0319/2026031900899.pdf",
+    "key_info": "Suspension of trading due to delay in 2025 annual results publication",
+    "added": "2026-03-19T19:51:08.861572",
+    "expires": "2026-06-17T19:51:08.861572"
+  },
+  "HK.06693": {
+    "stock_code": "06693",
+    "stock_name": "CHIFENG GOLD",
+    "category": "Trading Resumption",
+    "title": "(1) INSIDE INFORMATION:\nSHARE TRANSFER BY THE SINGLE LARGEST SHAREHOLDER GROUP;\n(2) ISSUE OF NEW H SHARES UNDER SPECIFIC MANDATE \n(3) CHANGE OF SINGLE LARGEST SHAREHOLDER GROUP;\nAND\n(4) RESUMPTION OF ",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0323/2026032300107.pdf",
+    "key_info": "Zijin Mining acquires controlling stake in Chifeng Gold through purchase of 242M A-shares (12.73%) + subscription of 311M new H-shares; total consideration ~RMB18.3B; controlling shareholder changes from Li Jinyang to Zijin Gold",
+    "added": "2026-03-23T16:15:29.779915",
+    "expires": "2026-06-21T16:15:29.779915"
+  },
+  "HK.00620": {
+    "stock_code": "00620",
+    "stock_name": "DTXS SILK ROAD",
+    "category": "Trading Resumption",
+    "title": "EXCHANGE NOTICE - RESUMPTION OF TRADING",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0323/2026032300159.htm",
+    "key_info": "",
+    "added": "2026-03-23T16:15:29.778832",
+    "expires": "2026-06-21T16:15:29.778832"
+  },
+  "HK.09906": {
+    "stock_code": "09906",
+    "stock_name": "HONLIV HEALTH",
+    "category": "Trading Halt",
+    "title": "EXCHANGE NOTICE - TRADING HALT",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0320/2026032000261.htm",
+    "key_info": "Trading halt for HONLIV HEALTH (09906) effective 9:00 a.m. on 20 March 2026 pending further announcement",
+    "added": "2026-03-20T16:15:29.289857",
+    "expires": "2026-06-18T16:15:29.289857"
+  },
+  "HK.01448": {
+    "stock_code": "01448",
+    "stock_name": "FU SHOU YUAN",
+    "category": "Trading Halt",
+    "title": "EXCHANGE NOTICE - SUSPENSION OF TRADING",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0320/2026032000267.htm",
+    "key_info": "Suspension of trading for FU SHOU YUAN (01448)",
+    "added": "2026-03-20T16:15:29.289426",
+    "expires": "2026-06-18T16:15:29.289426"
+  },
+  "HK.01252": {
+    "stock_code": "01252",
+    "stock_name": "CHINA TIANRUI",
+    "category": "Trading Halt",
+    "title": "EXCHANGE NOTICE - TRADING HALT",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0323/2026032300181.htm",
+    "key_info": "Trading halt for CHINA TIANRUI (01252.HK) pending release of inside information announcement",
+    "added": "2026-03-23T16:15:29.777710",
+    "expires": "2026-06-21T16:15:29.777710"
+  },
+  "HK.02899": {
+    "stock_code": "02899",
+    "stock_name": "ZIJIN MINING",
+    "category": "M&A",
+    "title": "Discloseable Transaction-Announcement in relation to the Acquisition of the Controlling Power in Chifeng Jilong Gold Mining Co., Ltd. through Acquisition of A Shares by Agreement and Subscription of N",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0323/2026032300130.pdf",
+    "key_info": "Zijin Mining acquiring control of Chifeng Jilong Gold Mining via RMB10B A shares purchase + HKD9.4B H shares subscription, total ~RMB18.26B for 25.85% stake",
+    "added": "2026-03-23T16:15:29.779414",
+    "expires": "2026-06-21T16:15:29.779414"
+  },
+  "HK.00383": {
+    "stock_code": "00383",
+    "stock_name": "TIANAN MEDICARE",
+    "category": "Trading Resumption",
+    "title": "EXCHANGE NOTICE - RESUMPTION OF TRADING",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0324/2026032400053.htm",
+    "key_info": "",
+    "added": "2026-03-24T14:25:47.922695",
+    "expires": "2026-06-22T14:25:47.922695"
+  }
+}
