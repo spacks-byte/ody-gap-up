@@ -739,191 +739,62 @@ async def cmd_tracked(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_joslist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Generate and send an Excel report for Jo's personal portfolio."""
-    import io
-    import pandas as pd
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
-    from openpyxl.utils import get_column_letter
+    """Run Jo's tracker script and report when it starts/finishes."""
+    import asyncio
+    import subprocess
+    import sys
 
-    await update.message.reply_text("⏳ Fetching watchlist data…")
+    script_dir = Path(__file__).resolve().parent.parent / "joslist"
+    script_path = script_dir / "stock_tracker.py"
 
-    try:
-        a = get_analyzer()
-        codes = [s["code"] for s in WATCHLIST_STOCKS]
+    if not script_path.exists():
+        await update.message.reply_text("❌ /joslist script not found at joslist/stock_tracker.py")
+        return
 
-        # Fetch snapshots in batches of 400
-        all_snaps = []
-        for i in range(0, len(codes), 400):
-            batch = codes[i:i + 400]
-            ret, snap = a.quote_ctx.get_market_snapshot(batch)
-            if ret == 0 and snap is not None and not snap.empty:
-                all_snaps.append(snap)
+    await update.message.reply_text(
+        "⏳ Running /joslist script now. This usually takes 2-3 minutes. "
+        "I'll send an update when it finishes."
+    )
 
-        if not all_snaps:
-            await update.message.reply_text("Could not fetch watchlist data.")
-            return
+    def _run_joslist_script():
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(script_dir),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return proc, None
+        except Exception as e:
+            return None, str(e)
 
-        snapshot = pd.concat(all_snaps, ignore_index=True)
-        source_map = {s["code"]: s["source"] for s in WATCHLIST_STOCKS}
-        name_map = {s["code"]: s["name"] for s in WATCHLIST_STOCKS}
+    loop = asyncio.get_event_loop()
+    proc, error = await loop.run_in_executor(None, _run_joslist_script)
 
-        # Build row data
-        rows = []
-        for _, row in snapshot.iterrows():
-            code = row["code"]
-            last = float(row.get("last_price", 0) or 0)
-            prev = float(row.get("prev_close_price", 0) or 0)
-            volume = float(row.get("volume", 0) or 0)
-            turnover = float(row.get("turnover", 0) or 0)
-            high = float(row.get("high_price", 0) or 0)
-            low = float(row.get("low_price", 0) or 0)
-            open_p = float(row.get("open_price", 0) or 0)
+    if error:
+        logger.exception("/joslist script failed to start")
+        await update.message.reply_text(f"❌ /joslist script failed to start: {error}")
+        return
 
-            # Calculate change % from prices (don't rely on change_rate field)
-            chg_pct = ((last - prev) / prev * 100) if prev > 0 else 0.0
-
-            avg_vol = float(row.get("volume_avg_5d", 0) or 0)
-            vol_ratio = (volume / avg_vol) if avg_vol > 0 else None
-
-            rows.append({
-                "Code": code,
-                "Company": name_map.get(code, str(row.get("name", ""))),
-                "Price": last,
-                "Prev Close": prev,
-                "Change %": chg_pct,
-                "Open": open_p,
-                "High": high,
-                "Low": low,
-                "Volume": int(volume),
-                "Vol vs Avg": vol_ratio,
-                "Turnover (HK$)": turnover,
-                "Bought with": source_map.get(code, "?"),
-            })
-
-        rows.sort(key=lambda r: abs(r["Change %"]), reverse=True)
-
-        # ── Build Excel workbook ──
-        wb = pd.DataFrame(rows)
-        buf = io.BytesIO()
-
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            # --- Sheet 1: Biggest Movers ---
-            movers = [r for r in rows if abs(r["Change %"]) >= 3.0]
-            if movers:
-                df_movers = pd.DataFrame(movers)
-                df_movers.to_excel(writer, sheet_name="Biggest Movers", index=False)
-
-            # --- Sheet 2: Full Watchlist ---
-            df_full = pd.DataFrame(rows)
-            df_full.to_excel(writer, sheet_name="Watchlist", index=False)
-
-            # --- Style both sheets ---
-            for sheet_name in writer.sheets:
-                ws = writer.sheets[sheet_name]
-                df = df_movers if sheet_name == "Biggest Movers" else df_full
-
-                # Colours
-                header_fill = PatternFill("solid", fgColor="1F4E79")
-                header_font = Font(bold=True, color="FFFFFF", size=11)
-                green_font = Font(color="006100")
-                green_fill = PatternFill("solid", fgColor="C6EFCE")
-                red_font = Font(color="9C0006")
-                red_fill = PatternFill("solid", fgColor="FFC7CE")
-                thin_border = Border(
-                    bottom=Side(style="thin", color="D9D9D9"),
-                )
-
-                # Header row
-                for col_idx in range(1, ws.max_column + 1):
-                    cell = ws.cell(row=1, column=col_idx)
-                    cell.fill = header_fill
-                    cell.font = header_font
-                    cell.alignment = Alignment(horizontal="center")
-
-                # Column widths
-                col_widths = {
-                    "Code": 13, "Company": 22, "Price": 10,
-                    "Prev Close": 11, "Change %": 10, "Open": 10,
-                    "High": 10, "Low": 10, "Volume": 14,
-                    "Vol vs Avg": 11, "Turnover (HK$)": 16, "Bought with": 18,
-                }
-                headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
-                for col_idx, h in enumerate(headers, 1):
-                    letter = get_column_letter(col_idx)
-                    ws.column_dimensions[letter].width = col_widths.get(h, 12)
-
-                # Data rows — formatting & conditional colour
-                chg_col = headers.index("Change %") + 1 if "Change %" in headers else None
-
-                for row_idx in range(2, ws.max_row + 1):
-                    for col_idx in range(1, ws.max_column + 1):
-                        cell = ws.cell(row=row_idx, column=col_idx)
-                        cell.border = thin_border
-                        h = headers[col_idx - 1]
-
-                        # Number formats
-                        if h in ("Price", "Prev Close", "Open", "High", "Low"):
-                            cell.number_format = "#,##0.000"
-                            cell.alignment = Alignment(horizontal="right")
-                        elif h == "Change %":
-                            cell.number_format = "+0.0%;-0.0%"
-                            # Store as decimal for Excel percentage format
-                            if cell.value is not None:
-                                cell.value = cell.value / 100
-                            cell.alignment = Alignment(horizontal="center")
-                        elif h == "Volume":
-                            cell.number_format = "#,##0"
-                            cell.alignment = Alignment(horizontal="right")
-                        elif h == "Vol vs Avg":
-                            if cell.value is not None:
-                                cell.number_format = "0.0\"x\""
-                            cell.alignment = Alignment(horizontal="center")
-                        elif h == "Turnover (HK$)":
-                            cell.number_format = "#,##0"
-                            cell.alignment = Alignment(horizontal="right")
-
-                    # Colour the entire row based on Change %
-                    if chg_col:
-                        chg_val = ws.cell(row=row_idx, column=chg_col).value
-                        if chg_val is not None:
-                            if chg_val > 0:
-                                for c in range(1, ws.max_column + 1):
-                                    ws.cell(row=row_idx, column=c).font = green_font
-                                    ws.cell(row=row_idx, column=c).fill = green_fill
-                            elif chg_val < 0:
-                                for c in range(1, ws.max_column + 1):
-                                    ws.cell(row=row_idx, column=c).font = red_font
-                                    ws.cell(row=row_idx, column=c).fill = red_fill
-
-                # Freeze top row
-                ws.freeze_panes = "A2"
-                # Auto-filter
-                ws.auto_filter.ref = ws.dimensions
-
-        buf.seek(0)
-        hm, now_hkt = _hk_now()
-        fname = f"JosList_{now_hkt.strftime('%Y-%m-%d_%H%M')}.xlsx"
-
-        # Send summary text
-        n_up = sum(1 for r in rows if r["Change %"] > 0)
-        n_down = sum(1 for r in rows if r["Change %"] < 0)
-        n_movers = len([r for r in rows if abs(r["Change %"]) >= 3.0])
+    if proc.returncode == 0:
         await update.message.reply_text(
-            f"📋 *Jo's List* — {len(rows)} stocks\n"
-            f"🟢 {n_up} up  🔴 {n_down} down  🔥 {n_movers} big movers (≥3%)",
-            parse_mode="Markdown",
+            "✅ /joslist script finished running.\n"
+            "📄 Data is available here: "
+            "https://docs.google.com/spreadsheets/d/1PiUuP3MNPPHUWVbLNQuPEWgABxa-8NNGiBpGG88EPEI/edit?gid=431873583#gid=431873583"
         )
+        return
 
-        # Send Excel file
-        await update.message.reply_document(
-            document=buf,
-            filename=fname,
-            caption="Jo's portfolio with live data",
+    output_tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-20:])
+    if output_tail:
+        await update.message.reply_text(
+            f"❌ /joslist script failed (exit code {proc.returncode}).\n\n"
+            f"Last output:\n{output_tail}"
         )
-
-    except Exception as e:
-        logger.exception("Watchlist failed")
-        await update.message.reply_text(f"Error: {e}")
+    else:
+        await update.message.reply_text(
+            f"❌ /joslist script failed (exit code {proc.returncode})."
+        )
 
 
 # ── Debug conversation states ───────────────────────────────────────────────────
@@ -1595,7 +1466,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "*📊 Scanning*\n"
         "/scan — Intraday movers (no overnight gap)\n"
         "/gapup — Overnight gap-up scan\n"
-        "/joslist — Jo's portfolio (price & volume Excel)\n"
+        "/joslist — Run Jo's tracker script (2-3 min)\n"
         "/tracked — Flagged stocks (Excel report)\n"
         "/debug — Score breakdown for any stock\n"
         "\n"
