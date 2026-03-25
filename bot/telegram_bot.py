@@ -66,6 +66,8 @@ FUTU_HOST = os.environ.get("FUTU_HOST", "127.0.0.1")
 FUTU_PORT = int(os.environ.get("FUTU_PORT", "11111"))
 SCAN_INTERVAL_S = int(os.environ.get("SCAN_INTERVAL", "300"))  # 5 min default
 MARKET = os.environ.get("MARKET", "HK")
+JOSLIST_FILE = Path(__file__).resolve().parent.parent / "joslist" / "fullstocks.txt"
+JOSLIST_MANUAL_HEADING = "# Manual Addition"
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -105,6 +107,61 @@ def _hk_now():
 def _hk_market_open() -> bool:
     hm, _ = _hk_now()
     return (930 <= hm < 1200) or (1300 <= hm < 1600)
+
+
+def _normalize_joslist_code(raw: str) -> str | None:
+    """Normalize user input into HK.XXXXX or US.SYMBOL format."""
+    token = (raw or "").strip().upper()
+    if not token:
+        return None
+
+    token = token.rstrip(",;")
+
+    if token.endswith(".HK"):
+        token = f"HK.{token[:-3]}"
+
+    if token.startswith("HK."):
+        suffix = token.split(".", 1)[1]
+        digits = "".join(ch for ch in suffix if ch.isdigit())
+        if not digits:
+            return None
+        return f"HK.{digits.zfill(5)}"
+
+    if token.startswith("US."):
+        symbol = token.split(".", 1)[1].strip()
+        if not symbol:
+            return None
+        return f"US.{symbol}"
+
+    if token.isdigit():
+        return f"HK.{token.zfill(5)}"
+
+    return None
+
+
+def _load_joslist_lines() -> list[str]:
+    return JOSLIST_FILE.read_text(encoding="utf-8").splitlines()
+
+
+def _save_joslist_lines(lines: list[str]) -> None:
+    JOSLIST_FILE.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+
+
+def _manual_section_insert_index(lines: list[str]) -> int:
+    heading_idx = next(
+        (i for i, line in enumerate(lines) if line.strip().lower() == JOSLIST_MANUAL_HEADING.lower()),
+        -1,
+    )
+    if heading_idx == -1:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(JOSLIST_MANUAL_HEADING)
+        return len(lines)
+
+    for i in range(heading_idx + 1, len(lines)):
+        if lines[i].strip().startswith("#"):
+            return i
+    return len(lines)
 
 
 # ── Telegram command handlers ───────────────────────────────────────────────────
@@ -811,6 +868,80 @@ async def cmd_joslist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def cmd_joadd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Add a stock code into joslist/fullstocks.txt under Manual Addition."""
+    if not ctx.args:
+        await update.message.reply_text("Usage: /joadd HK.00700  (or /joadd 700)")
+        return
+
+    code = _normalize_joslist_code(ctx.args[0])
+    if not code:
+        await update.message.reply_text("❌ Invalid code format. Use HK.00700, 700, or US.TSLA")
+        return
+
+    if not JOSLIST_FILE.exists():
+        await update.message.reply_text("❌ joslist/fullstocks.txt was not found.")
+        return
+
+    try:
+        lines = _load_joslist_lines()
+        existing = {
+            line.strip().upper()
+            for line in lines
+            if line.strip() and not line.strip().startswith("#")
+        }
+
+        if code in existing:
+            await update.message.reply_text(f"ℹ️ {code} is already in the list.")
+            return
+
+        insert_at = _manual_section_insert_index(lines)
+        lines.insert(insert_at, code)
+        _save_joslist_lines(lines)
+        await update.message.reply_text(f"✅ Added {code} to joslist (Manual Addition).")
+    except Exception as e:
+        logger.exception("/joadd failed")
+        await update.message.reply_text(f"❌ /joadd failed: {e}")
+
+
+async def cmd_joremove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Remove a stock code from all occurrences in joslist/fullstocks.txt."""
+    if not ctx.args:
+        await update.message.reply_text("Usage: /joremove HK.00700  (or /joremove 700)")
+        return
+
+    code = _normalize_joslist_code(ctx.args[0])
+    if not code:
+        await update.message.reply_text("❌ Invalid code format. Use HK.00700, 700, or US.TSLA")
+        return
+
+    if not JOSLIST_FILE.exists():
+        await update.message.reply_text("❌ joslist/fullstocks.txt was not found.")
+        return
+
+    try:
+        lines = _load_joslist_lines()
+        filtered = []
+        removed = 0
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and stripped.upper() == code:
+                removed += 1
+                continue
+            filtered.append(line)
+
+        if removed == 0:
+            await update.message.reply_text(f"ℹ️ {code} was not found in joslist.")
+            return
+
+        _save_joslist_lines(filtered)
+        await update.message.reply_text(f"✅ Removed {code} from joslist ({removed} entr{'y' if removed == 1 else 'ies'}).")
+    except Exception as e:
+        logger.exception("/joremove failed")
+        await update.message.reply_text(f"❌ /joremove failed: {e}")
+
+
 # ── Debug conversation states ───────────────────────────────────────────────────
 DEBUG_CODE = 0
 
@@ -1481,6 +1612,8 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/scan — Intraday movers (no overnight gap)\n"
         "/gapup — Overnight gap-up scan\n"
         "/joslist — Run Jo's tracker script (up to 10 min)\n"
+        "/joadd CODE — Add stock to Jo list under Manual Addition\n"
+        "/joremove CODE — Remove stock from Jo list\n"
         "/tracked — Flagged stocks (Excel report)\n"
         "/debug — Score breakdown for any stock\n"
         "\n"
@@ -1947,6 +2080,8 @@ def main():
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("gapup", cmd_gapup))
     app.add_handler(CommandHandler("joslist", cmd_joslist))
+    app.add_handler(CommandHandler("joadd", cmd_joadd))
+    app.add_handler(CommandHandler("joremove", cmd_joremove))
     app.add_handler(CommandHandler("tracked", cmd_tracked))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(CommandHandler("status", cmd_status))
