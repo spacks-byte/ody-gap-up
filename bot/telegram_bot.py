@@ -110,7 +110,7 @@ def _hk_market_open() -> bool:
 
 
 def _normalize_joslist_code(raw: str) -> str | None:
-    """Normalize user input into HK.XXXXX or US.SYMBOL format."""
+    """Normalize user input into HK.XXXXX or US.SYMBOL format"""
     token = (raw or "").strip().upper()
     if not token:
         return None
