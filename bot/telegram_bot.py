@@ -82,7 +82,7 @@ logger = logging.getLogger(__name__)
 
 analyzer: TopGainersAnalyzer | None = None
 last_scan_time: datetime | None = None
-monitoring_active: bool = False
+monitoring_active: bool = True  # ON by default so scheduled scans run after restart
 _eod_saved_date = None  # tracks whether we've saved today's EOD turnover
 
 
