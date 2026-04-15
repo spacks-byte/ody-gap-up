@@ -78,5 +78,105 @@
     "key_info": "",
     "added": "2026-03-24T14:25:47.922695",
     "expires": "2026-06-22T14:25:47.922695"
+  },
+  "HK.03668": {
+    "stock_code": "03668",
+    "stock_name": "YANCOAL AUS",
+    "category": "Trading Halt",
+    "title": "EXCHANGE NOTICE - TRADING HALT",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400183.htm",
+    "key_info": "Yancoal Australia (03668.HK) trading halted mid-session on April 14, 2026, pending inside information or material announcement",
+    "added": "2026-04-14T18:44:01.535085",
+    "expires": "2026-07-13T18:44:01.535085"
+  },
+  "HK.02892": {
+    "stock_code": "02892",
+    "stock_name": "MILLION CITIES",
+    "category": "M&A",
+    "title": "POLL RESULTS OF THE EXTRAORDINARY GENERAL MEETING\nHELD ON 14 APRIL 2026",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400404.pdf",
+    "key_info": "",
+    "added": "2026-04-14T17:41:57.071994",
+    "expires": "2026-07-13T17:41:57.071994"
+  },
+  "HK.06816": {
+    "stock_code": "06816",
+    "stock_name": "PROSPER CONS",
+    "category": "M&A",
+    "title": "FURTHER DELAY IN DESPATCH OF CIRCULAR",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400143.pdf",
+    "key_info": "",
+    "added": "2026-04-14T17:41:57.074872",
+    "expires": "2026-07-13T17:41:57.074872"
+  },
+  "HK.01013": {
+    "stock_code": "01013",
+    "stock_name": "WAI CHUN GROUP",
+    "category": "Trading Resumption",
+    "title": "EXCHANGE NOTICE - RESUMPTION OF TRADING",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400065.htm",
+    "key_info": "Trading resumption of WAI CHUN GROUP (01013.HK) following one-day halt on April 13, 2026",
+    "added": "2026-04-14T18:44:01.535743",
+    "expires": "2026-07-13T18:44:01.535743"
+  },
+  "HK.00660": {
+    "stock_code": "00660",
+    "stock_name": "WAI CHUN BIOTEC",
+    "category": "Trading Resumption",
+    "title": "EXCHANGE NOTICE - RESUMPTION OF TRADING",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400063.htm",
+    "key_info": "",
+    "added": "2026-04-14T18:44:01.536305",
+    "expires": "2026-07-13T18:44:01.536305"
+  },
+  "HK.02627": {
+    "stock_code": "02627",
+    "stock_name": "AB&B BIO-TECH-B",
+    "category": "Trading Halt",
+    "title": "PROPOSED CHANGE OF AUDITOR",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400039.pdf",
+    "key_info": "",
+    "added": "2026-04-14T17:52:40.521395",
+    "expires": "2026-07-13T17:52:40.521395"
+  },
+  "HK.03330": {
+    "stock_code": "03330",
+    "stock_name": "LINGBAO GOLD",
+    "category": "Share Placement",
+    "title": "PLACING OF EXISTING SHARES AND TOP-UP SUBSCRIPTION OF NEW SHARES UNDER GENERAL MANDATE",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400023.pdf",
+    "key_info": "Placing 29,816,000 existing H shares at HK$26.16 (4.53% discount) with top-up subscription of equal new shares under general mandate; ~HK$771M net proceeds",
+    "added": "2026-04-14T18:44:01.536911",
+    "expires": "2026-07-13T18:44:01.536911"
+  },
+  "HK.01796": {
+    "stock_code": "01796",
+    "stock_name": "METASPACEX",
+    "category": "Trading Halt",
+    "title": "VOLUNTARY ANNOUNCEMENT\nCHANGE IN SHAREHOLDING OF THE CONTROLLING SHAREHOLDER\nAND CONTINUED TRADING HALT",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400019.pdf",
+    "key_info": "",
+    "added": "2026-04-14T17:41:57.078620",
+    "expires": "2026-07-13T17:41:57.078620"
+  },
+  "HK.09638": {
+    "stock_code": "09638",
+    "stock_name": "FERRETTI",
+    "category": "Takeover",
+    "title": "VOLUNTARY CONDITIONAL PARTIAL PUBLIC TENDER OFFER LAUNCHED BY KKCG MARITIME TO ACQUIRE UP TO 52,132,861 SHARES OF FERRETTI S.P.A. - NOTICE ON THE PRELIMINARY RESULTS OF THE OFFER",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400001.pdf",
+    "key_info": "",
+    "added": "2026-04-14T17:41:57.080130",
+    "expires": "2026-07-13T17:41:57.080130"
+  },
+  "HK.01171": {
+    "stock_code": "01171",
+    "stock_name": "YANKUANG ENERGY",
+    "category": "M&A",
+    "title": "PROPOSED ACQUISITION OF 80% INTEREST IN KESTREL COAL MINE BY YANCOAL AUSTRALIA",
+    "link": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0414/2026041400658.pdf",
+    "key_info": "Yancoal Australia to acquire 100% equity in KCG for indirect 80% interest in Kestrel Coal Mine; max consideration US$2.4B (US$1.85B upfront + up to US$550M contingent)",
+    "added": "2026-04-14T18:44:01.531426",
+    "expires": "2026-07-13T18:44:01.531426"
   }
 }

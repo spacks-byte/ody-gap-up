@@ -317,6 +317,10 @@ class StockTracker:
                 data.iloc[120]["close"] if len(data) > 120 else None,
             )
 
+            # SMA calculations (data is sorted descending, so iloc[0:N] = last N days)
+            sma_20 = round(data["close"].iloc[:20].mean(), 3) if len(data) >= 20 else None
+            sma_50 = round(data["close"].iloc[:50].mean(), 3) if len(data) >= 50 else None
+
             date_value = latest["time_key"]
             if isinstance(date_value, pd.Timestamp):
                 date_str = date_value.strftime("%Y-%m-%d")
@@ -338,6 +342,8 @@ class StockTracker:
                 "% Change vs 30 Days": round(pct_change_30d, 2) if pct_change_30d is not None else None,
                 "% Change vs 60 Days": round(pct_change_60d, 2) if pct_change_60d is not None else None,
                 "% Change vs 120 Days": round(pct_change_120d, 2) if pct_change_120d is not None else None,
+                "20 SMA": sma_20,
+                "50 SMA": sma_50,
             }
 
             results.append(result)
@@ -375,6 +381,8 @@ class StockTracker:
                 "% Change vs 30 Days",
                 "% Change vs 60 Days",
                 "% Change vs 120 Days",
+                "20 SMA",
+                "50 SMA",
             ]
             worksheet.append_row(headers)
             print(f"Created new worksheet: {WORKSHEET_TITLE}")
@@ -407,6 +415,8 @@ class StockTracker:
                 "% Change vs 30 Days",
                 "% Change vs 60 Days",
                 "% Change vs 120 Days",
+                "20 SMA",
+                "50 SMA",
             ]
 
             data_rows = []
@@ -424,6 +434,8 @@ class StockTracker:
                     row["% Change vs 30 Days"] if pd.notna(row["% Change vs 30 Days"]) else "",
                     row["% Change vs 60 Days"] if pd.notna(row["% Change vs 60 Days"]) else "",
                     row["% Change vs 120 Days"] if pd.notna(row["% Change vs 120 Days"]) else "",
+                    row["20 SMA"] if pd.notna(row.get("20 SMA")) else "",
+                    row["50 SMA"] if pd.notna(row.get("50 SMA")) else "",
                 ]
                 data_rows.append(data_row)
 
@@ -488,6 +500,48 @@ class StockTracker:
                     )
 
                 self.sheet.spreadsheet.batch_update({"requests": requests})
+
+                # Number formats with comma separators
+                num_fmt_requests = []
+                # Prices: cols E(4), F(5) — #,##0.000
+                for col_idx in [4, 5]:
+                    num_fmt_requests.append({
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": 1,
+                                "endRowIndex": last_row_index,
+                                "startColumnIndex": col_idx,
+                                "endColumnIndex": col_idx + 1,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "numberFormat": {"type": "NUMBER", "pattern": "#,##0.000"},
+                                }
+                            },
+                            "fields": "userEnteredFormat.numberFormat",
+                        }
+                    })
+                # Percentages: cols G-L (6-11), SMAs: cols M-N (12-13) — #,##0.00
+                for col_idx in range(6, 14):
+                    num_fmt_requests.append({
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": 1,
+                                "endRowIndex": last_row_index,
+                                "startColumnIndex": col_idx,
+                                "endColumnIndex": col_idx + 1,
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"},
+                                }
+                            },
+                            "fields": "userEnteredFormat.numberFormat",
+                        }
+                    })
+                self.sheet.spreadsheet.batch_update({"requests": num_fmt_requests})
 
             print(f"\nGoogle Sheets updated successfully with {len(data_rows)} stocks")
             print(f"View at: {GOOGLE_SHEET_URL}")

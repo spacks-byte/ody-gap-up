@@ -52,11 +52,14 @@ from scoring import (
     _format_turnover,
     _format_large_number,
     _get_yesterday_turnover,
+    build_telegram_message,
+    build_intraday_message,
 )
-from watchlist_data import WATCHLIST_STOCKS
 from hkex.announcement_tracker import scan_announcements, scan_by_date, format_alerts
 from hkex.llm_classifier import analyze_deal
 from hkex.attention_list import add_from_scan_results, get_all as get_attention_stocks, get_codes as get_attention_codes, get_annotation
+from bot.sheets_writer import write_scanner_hits, write_corporate_actions, write_ipo_tracker
+from hkex.ipo_tracker import fetch_recent_ipos
 
 # ── Config ──────────────────────────────────────────────────────────────────────
 
@@ -165,6 +168,72 @@ def _manual_section_insert_index(lines: list[str]) -> int:
 
 
 # ── Telegram command handlers ───────────────────────────────────────────────────
+
+
+def _sync_scanner_hits_to_sheets(analyzer):
+    """Sync all tracked scanner stocks to Google Sheets 'Scanner Hits' tab."""
+    import pandas as pd
+
+    tracked = analyzer.load_tracked_stocks()
+    market_stocks = {c: d for c, d in tracked.items()
+                     if d.get('market') == MARKET}
+    if not market_stocks:
+        return None
+
+    stock_codes = list(market_stocks.keys())
+    all_snaps = []
+    for i in range(0, len(stock_codes), 400):
+        batch = stock_codes[i:i + 400]
+        try:
+            ret, snap = analyzer.quote_ctx.get_market_snapshot(batch)
+            if ret == 0 and snap is not None and not snap.empty:
+                all_snaps.append(snap)
+        except Exception:
+            pass
+
+    snap_map = {}
+    if all_snaps:
+        snapshot = pd.concat(all_snaps, ignore_index=True)
+        for _, row in snapshot.iterrows():
+            snap_map[row['code']] = row
+
+    rows = []
+    for code, td in market_stocks.items():
+        ini = td['initial_price']
+        first_seen = datetime.fromisoformat(td['first_seen'])
+        days = (datetime.now() - first_seen).days
+        pinned = 'Yes' if td.get('permanent') else ''
+        r = snap_map.get(code)
+        cur = float(r['last_price']) if r is not None else ini
+        daily_chg = float(r.get('change_rate', 0) or 0) if r is not None else 0.0
+        volume = int(r.get('volume', 0) or 0) if r is not None else 0
+        turnover = float(r.get('turnover', 0) or 0) if r is not None else 0.0
+        total_chg = ((cur - ini) / ini * 100) if ini > 0 else 0
+
+        rows.append({
+            'Code': code,
+            'Name': td['name'],
+            'Initial Price': round(ini, 3),
+            'Current Price': round(cur, 3),
+            'Since Tracked %': round(total_chg, 1),
+            'Daily Change %': round(daily_chg, 1),
+            'Volume': volume,
+            'Turnover (HK$)': round(turnover),
+            'Days Tracked': days,
+            'First Seen': first_seen.strftime('%Y-%m-%d %H:%M'),
+            'Pinned': pinned,
+        })
+
+    rows.sort(key=lambda r: abs(r['Since Tracked %']), reverse=True)
+
+    description = (
+        "--- SCANNER HITS ---",
+        "Stocks automatically flagged by the gap-up / intraday scanner (score >= 4).",
+        "Auto-tracked for 3 days, then removed. Pinned stocks stay indefinitely.",
+        f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')} HKT",
+    )
+    url = write_scanner_hits(rows, "\n".join(description))
+    return url, rows
 
 
 def _build_scan_excel(alerts, watches, tracked_rows, scan_type="intraday"):
@@ -432,18 +501,32 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Recap error: {e}")
         return
 
-    await update.message.reply_text(f"⏳ Scanning {MARKET} intraday movers...")
+    await update.message.reply_text(f"⏳ Scanning {MARKET} (intraday + gap-up)...")
     try:
-        alerts, watches = a.scan_intraday_movers(market=MARKET)
-        last_scan_time = datetime.now()
+        # Run both scanners, deduplicate (same logic as scheduled_scan)
+        intra_alerts, intra_watches = a.scan_intraday_movers(market=MARKET)
+        gap_alerts, gap_watches = a.scan_gap_ups(market=MARKET)
 
-        # Track alerted & watch stocks (same as before)
-        for row, result in alerts:
-            code = result["code"]
-            a.add_to_tracking(code, str(row.get("name", "")),
-                              float(row.get("last_price", 0) or 0),
-                              float(row.get("change_5min", 0) or 0), MARKET)
-        for row, result in watches:
+        seen = set()
+        alerts, watches = [], []
+        for row, result in intra_alerts:
+            seen.add(result["code"])
+            alerts.append((row, result))
+        for row, result in gap_alerts:
+            if result["code"] not in seen:
+                seen.add(result["code"])
+                alerts.append((row, result))
+        for row, result in intra_watches:
+            if result["code"] not in seen:
+                seen.add(result["code"])
+                watches.append((row, result))
+        for row, result in gap_watches:
+            if result["code"] not in seen:
+                seen.add(result["code"])
+                watches.append((row, result))
+
+        # Track alerted & watch stocks
+        for row, result in alerts + watches:
             code = result["code"]
             tracked = a.load_tracked_stocks()
             if code not in tracked:
@@ -451,355 +534,54 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                   float(row.get("last_price", 0) or 0),
                                   float(row.get("change_5min", 0) or 0), MARKET)
 
-        tracked_rows = _get_tracked_gainers(a, MARKET)
-        buf = _build_scan_excel(alerts, watches, tracked_rows, scan_type="intraday")
+        last_scan_time = datetime.now()
 
-        fname = f"Scan_Intraday_{now_hkt.strftime('%Y-%m-%d_%H%M')}.xlsx"
-        summary = (
-            f"📊 *Intraday Scan Complete*\n"
-            f"🔥 {len(alerts)} alerts  |  📊 {len(watches)} watch\n"
-            f"📡 {len(tracked_rows)} tracked stocks still gaining"
-        )
-        await update.message.reply_text(summary, parse_mode="Markdown")
-        await update.message.reply_document(document=buf, filename=fname,
-                                            caption="Intraday scan results")
+        # Send top 2 alerts to Telegram
+        top_alerts = sorted(alerts, key=lambda x: x[1].get("score", 0), reverse=True)[:2]
+        for row, result in top_alerts:
+            trigger = result.get("trigger", "gap_up")
+            if trigger == "gap_up":
+                msg = build_telegram_message(row, result)
+            else:
+                msg = build_intraday_message(row, result)
+            await update.message.reply_text(msg, parse_mode="Markdown")
+
+        # Sync all results to Google Sheets
+        try:
+            result_info = _sync_scanner_hits_to_sheets(a)
+            if result_info:
+                url, sheet_rows = result_info
+                summary = (
+                    f"📊 *Scan Complete*\n"
+                    f"🔥 {len(alerts)} alerts  |  📊 {len(watches)} watch\n\n"
+                    f"[Full results in Google Sheets]({url})"
+                )
+            else:
+                summary = (
+                    f"📊 *Scan Complete*\n"
+                    f"🔥 {len(alerts)} alerts  |  📊 {len(watches)} watch"
+                )
+            await update.message.reply_text(summary, parse_mode="Markdown",
+                                            disable_web_page_preview=True)
+        except Exception as e:
+            logger.warning("Scanner hits Sheets sync failed: %s", e)
+            await update.message.reply_text(
+                f"📊 *Scan Complete* — {len(alerts)} alerts, {len(watches)} watch\n"
+                f"⚠️ Google Sheets sync failed.",
+                parse_mode="Markdown",
+            )
     except Exception as e:
         logger.exception("Scan failed")
         await update.message.reply_text(f"Scan error: {e}")
 
 
-async def cmd_gapup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Run a gap-up scan → Excel output with alerts + tracked gainers."""
-    global last_scan_time
-    hm, now_hkt = _hk_now()
-    market_open = (930 <= hm < 1200) or (1300 <= hm < 1600)
-
-    a = get_analyzer()
-
-    if not market_open:
-        time_str = now_hkt.strftime("%H:%M")
-        await update.message.reply_text(
-            f"🕐 HK market is closed ({time_str} HKT).\n"
-            f"Generating end-of-market recap..."
-        )
-        try:
-            msgs = a.get_eod_recap(market=MARKET, top_n=10)
-            last_scan_time = datetime.now()
-            if msgs:
-                for msg in msgs:
-                    await update.message.reply_text(msg, parse_mode="Markdown")
-            else:
-                await update.message.reply_text("Could not retrieve market data for recap.")
-        except Exception as e:
-            logger.exception("EOD recap failed")
-            await update.message.reply_text(f"Recap error: {e}")
-        return
-
-    await update.message.reply_text(f"⏳ Scanning {MARKET} gap-ups...")
-    try:
-        alerts, watches = a.scan_gap_ups(market=MARKET)
-        last_scan_time = datetime.now()
-
-        for row, result in alerts:
-            code = result["code"]
-            a.add_to_tracking(code, str(row.get("name", "")),
-                              float(row.get("last_price", 0) or 0),
-                              float(row.get("change_5min", 0) or 0), MARKET)
-        for row, result in watches:
-            code = result["code"]
-            tracked = a.load_tracked_stocks()
-            if code not in tracked:
-                a.add_to_tracking(code, str(row.get("name", "")),
-                                  float(row.get("last_price", 0) or 0),
-                                  float(row.get("change_5min", 0) or 0), MARKET)
-
-        tracked_rows = _get_tracked_gainers(a, MARKET)
-        buf = _build_scan_excel(alerts, watches, tracked_rows, scan_type="gapup")
-
-        fname = f"Scan_GapUp_{now_hkt.strftime('%Y-%m-%d_%H%M')}.xlsx"
-        summary = (
-            f"📊 *Gap-Up Scan Complete*\n"
-            f"🔥 {len(alerts)} alerts  |  📊 {len(watches)} watch\n"
-            f"📡 {len(tracked_rows)} tracked stocks still gaining"
-        )
-        await update.message.reply_text(summary, parse_mode="Markdown")
-        await update.message.reply_document(document=buf, filename=fname,
-                                            caption="Gap-up scan results")
-    except Exception as e:
-        logger.exception("Gap-up scan failed")
-        await update.message.reply_text(f"Scan error: {e}")
-
-
-async def cmd_tracked(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Send tracked stocks as an Excel file to avoid Telegram message limits."""
-    import io
-    import pandas as pd
-    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-    from openpyxl.utils import get_column_letter
-
-    try:
-        a = get_analyzer()
-        tracked = a.load_tracked_stocks()
-        market_stocks = {c: d for c, d in tracked.items()
-                         if d.get('market') == MARKET}
-
-        if not market_stocks:
-            await update.message.reply_text("No tracked movers!")
-            return
-
-        # Fetch live prices
-        stock_codes = list(market_stocks.keys())
-        all_snaps = []
-        for i in range(0, len(stock_codes), 400):
-            batch = stock_codes[i:i + 400]
-            ret, snap = a.quote_ctx.get_market_snapshot(batch)
-            if ret == 0 and snap is not None and not snap.empty:
-                all_snaps.append(snap)
-
-        snap_map = {}
-        if all_snaps:
-            snapshot = pd.concat(all_snaps, ignore_index=True)
-            for _, row in snapshot.iterrows():
-                snap_map[row['code']] = row
-
-        rows = []
-        for code, td in market_stocks.items():
-            ini = td['initial_price']
-            first_seen = datetime.fromisoformat(td['first_seen'])
-            days = (datetime.now() - first_seen).days
-            pinned = '📌' if td.get('permanent') else ''
-            r = snap_map.get(code)
-            cur = float(r['last_price']) if r is not None else ini
-            daily_chg = float(r.get('change_rate', 0) or 0) if r is not None else 0.0
-            volume = int(r.get('volume', 0) or 0) if r is not None else 0
-            turnover = float(r.get('turnover', 0) or 0) if r is not None else 0.0
-            total_chg = ((cur - ini) / ini * 100) if ini > 0 else 0
-
-            rows.append({
-                'Code': code,
-                'Name': td['name'],
-                'Initial Price': ini,
-                'Current Price': cur,
-                'Since Tracked %': total_chg,
-                'Daily Change %': daily_chg,
-                'Volume': volume,
-                'Turnover (HK$)': turnover,
-                'Days Tracked': days,
-                'First Seen': first_seen.strftime('%Y-%m-%d %H:%M'),
-                'Pinned': pinned,
-            })
-
-        rows.sort(key=lambda r: abs(r['Since Tracked %']), reverse=True)
-
-        # ── Fetch watchlist data ──
-        wl_codes = [s["code"] for s in WATCHLIST_STOCKS]
-        wl_snaps = []
-        for i in range(0, len(wl_codes), 400):
-            batch = wl_codes[i:i + 400]
-            ret, snap = a.quote_ctx.get_market_snapshot(batch)
-            if ret == 0 and snap is not None and not snap.empty:
-                wl_snaps.append(snap)
-
-        wl_rows = []
-        if wl_snaps:
-            wl_snapshot = pd.concat(wl_snaps, ignore_index=True)
-            source_map = {s["code"]: s["source"] for s in WATCHLIST_STOCKS}
-            name_map = {s["code"]: s["name"] for s in WATCHLIST_STOCKS}
-            for _, r in wl_snapshot.iterrows():
-                code = r["code"]
-                last = float(r.get("last_price", 0) or 0)
-                prev = float(r.get("prev_close_price", 0) or 0)
-                volume = float(r.get("volume", 0) or 0)
-                turnover = float(r.get("turnover", 0) or 0)
-                high = float(r.get("high_price", 0) or 0)
-                low = float(r.get("low_price", 0) or 0)
-                open_p = float(r.get("open_price", 0) or 0)
-                chg_pct = ((last - prev) / prev * 100) if prev > 0 else 0.0
-                avg_vol = float(r.get("volume_avg_5d", 0) or 0)
-                vol_ratio = (volume / avg_vol) if avg_vol > 0 else None
-
-                wl_rows.append({
-                    "Code": code,
-                    "Company": name_map.get(code, str(r.get("name", ""))),
-                    "Price": last,
-                    "Prev Close": prev,
-                    "Change %": chg_pct,
-                    "Open": open_p,
-                    "High": high,
-                    "Low": low,
-                    "Volume": int(volume),
-                    "Vol vs Avg": vol_ratio,
-                    "Turnover (HK$)": turnover,
-                    "Source": source_map.get(code, "?"),
-                })
-            wl_rows.sort(key=lambda r: abs(r["Change %"]), reverse=True)
-
-        # Build Excel
-        buf = io.BytesIO()
-        header_fill = PatternFill('solid', fgColor='1F4E79')
-        header_font = Font(bold=True, color='FFFFFF', size=11)
-        green_font = Font(color='006100')
-        green_fill = PatternFill('solid', fgColor='C6EFCE')
-        red_font = Font(color='9C0006')
-        red_fill = PatternFill('solid', fgColor='FFC7CE')
-        thin_border = Border(bottom=Side(style='thin', color='D9D9D9'))
-
-        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-            # ── Sheet 1: Tracked Movers ──
-            df = pd.DataFrame(rows)
-            df.to_excel(writer, sheet_name='Tracked Movers', index=False)
-
-            ws = writer.sheets['Tracked Movers']
-            headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
-            col_widths = {
-                'Code': 13, 'Name': 22, 'Initial Price': 12,
-                'Current Price': 12, 'Since Tracked %': 14,
-                'Daily Change %': 13, 'Volume': 14,
-                'Turnover (HK$)': 16, 'Days Tracked': 12,
-                'First Seen': 17, 'Pinned': 7,
-            }
-            for col_idx in range(1, ws.max_column + 1):
-                cell = ws.cell(row=1, column=col_idx)
-                cell.fill = header_fill
-                cell.font = header_font
-                cell.alignment = Alignment(horizontal='center')
-                h = headers[col_idx - 1]
-                letter = get_column_letter(col_idx)
-                ws.column_dimensions[letter].width = col_widths.get(h, 12)
-
-            chg_col = headers.index('Since Tracked %') + 1 if 'Since Tracked %' in headers else None
-
-            for row_idx in range(2, ws.max_row + 1):
-                for col_idx in range(1, ws.max_column + 1):
-                    cell = ws.cell(row=row_idx, column=col_idx)
-                    cell.border = thin_border
-                    h = headers[col_idx - 1]
-                    if h in ('Initial Price', 'Current Price'):
-                        cell.number_format = '#,##0.000'
-                        cell.alignment = Alignment(horizontal='right')
-                    elif h in ('Since Tracked %', 'Daily Change %'):
-                        if cell.value is not None:
-                            cell.value = cell.value / 100
-                        cell.number_format = '+0.0%;-0.0%'
-                        cell.alignment = Alignment(horizontal='center')
-                    elif h == 'Volume':
-                        cell.number_format = '#,##0'
-                        cell.alignment = Alignment(horizontal='right')
-                    elif h == 'Turnover (HK$)':
-                        cell.number_format = '#,##0'
-                        cell.alignment = Alignment(horizontal='right')
-
-                if chg_col:
-                    chg_val = ws.cell(row=row_idx, column=chg_col).value
-                    if chg_val is not None:
-                        if chg_val > 0:
-                            for c in range(1, ws.max_column + 1):
-                                ws.cell(row=row_idx, column=c).font = green_font
-                                ws.cell(row=row_idx, column=c).fill = green_fill
-                        elif chg_val < 0:
-                            for c in range(1, ws.max_column + 1):
-                                ws.cell(row=row_idx, column=c).font = red_font
-                                ws.cell(row=row_idx, column=c).fill = red_fill
-
-            ws.freeze_panes = 'A2'
-            ws.auto_filter.ref = ws.dimensions
-
-            # ── Sheet 2: Watchlist ──
-            if wl_rows:
-                df_wl = pd.DataFrame(wl_rows)
-            else:
-                df_wl = pd.DataFrame(columns=["No watchlist data"])
-            df_wl.to_excel(writer, sheet_name='Watchlist', index=False)
-
-            ws_wl = writer.sheets['Watchlist']
-            wl_headers = [ws_wl.cell(row=1, column=c).value for c in range(1, ws_wl.max_column + 1)]
-            wl_col_widths = {
-                'Code': 13, 'Company': 22, 'Price': 10,
-                'Prev Close': 11, 'Change %': 10, 'Open': 10,
-                'High': 10, 'Low': 10, 'Volume': 14,
-                'Vol vs Avg': 11, 'Turnover (HK$)': 16, 'Source': 18,
-            }
-            for col_idx in range(1, ws_wl.max_column + 1):
-                cell = ws_wl.cell(row=1, column=col_idx)
-                cell.fill = header_fill
-                cell.font = header_font
-                cell.alignment = Alignment(horizontal='center')
-                h = wl_headers[col_idx - 1]
-                letter = get_column_letter(col_idx)
-                ws_wl.column_dimensions[letter].width = wl_col_widths.get(h, 12)
-
-            wl_chg_col = wl_headers.index('Change %') + 1 if 'Change %' in wl_headers else None
-
-            for row_idx in range(2, ws_wl.max_row + 1):
-                for col_idx in range(1, ws_wl.max_column + 1):
-                    cell = ws_wl.cell(row=row_idx, column=col_idx)
-                    cell.border = thin_border
-                    h = wl_headers[col_idx - 1]
-                    if h in ('Price', 'Prev Close', 'Open', 'High', 'Low'):
-                        cell.number_format = '#,##0.000'
-                        cell.alignment = Alignment(horizontal='right')
-                    elif h == 'Change %':
-                        if cell.value is not None:
-                            cell.value = cell.value / 100
-                        cell.number_format = '+0.0%;-0.0%'
-                        cell.alignment = Alignment(horizontal='center')
-                    elif h == 'Volume':
-                        cell.number_format = '#,##0'
-                        cell.alignment = Alignment(horizontal='right')
-                    elif h == 'Vol vs Avg':
-                        if cell.value is not None:
-                            cell.number_format = '0.0"x"'
-                        cell.alignment = Alignment(horizontal='center')
-                    elif h == 'Turnover (HK$)':
-                        cell.number_format = '#,##0'
-                        cell.alignment = Alignment(horizontal='right')
-
-                if wl_chg_col:
-                    chg_val = ws_wl.cell(row=row_idx, column=wl_chg_col).value
-                    if chg_val is not None:
-                        if chg_val > 0:
-                            for c in range(1, ws_wl.max_column + 1):
-                                ws_wl.cell(row=row_idx, column=c).font = green_font
-                                ws_wl.cell(row=row_idx, column=c).fill = green_fill
-                        elif chg_val < 0:
-                            for c in range(1, ws_wl.max_column + 1):
-                                ws_wl.cell(row=row_idx, column=c).font = red_font
-                                ws_wl.cell(row=row_idx, column=c).fill = red_fill
-
-            ws_wl.freeze_panes = 'A2'
-            ws_wl.auto_filter.ref = ws_wl.dimensions
-
-        buf.seek(0)
-        hm, now_hkt = _hk_now()
-        fname = f"TrackedMovers_{now_hkt.strftime('%Y-%m-%d_%H%M')}.xlsx"
-
-        n_up = sum(1 for r in rows if r['Since Tracked %'] > 0)
-        n_down = sum(1 for r in rows if r['Since Tracked %'] < 0)
-        wl_up = sum(1 for r in wl_rows if r['Change %'] > 0)
-        wl_down = sum(1 for r in wl_rows if r['Change %'] < 0)
-        await update.message.reply_text(
-            f"🔧 *Tracked Movers* — {len(rows)} stocks\n"
-            f"🟢 {n_up} up  🔴 {n_down} down since flagged\n\n"
-            f"📋 *Watchlist* — {len(wl_rows)} stocks\n"
-            f"🟢 {wl_up} up  🔴 {wl_down} down today",
-            parse_mode='Markdown',
-        )
-        await update.message.reply_document(
-            document=buf,
-            filename=fname,
-            caption='Tracked movers & watchlist with live data',
-        )
-
-    except Exception as e:
-        logger.exception('Tracked movers failed')
-        await update.message.reply_text(f'Error: {e}')
-
 
 async def cmd_joslist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Run Jo's tracker script and report when it starts/finishes."""
+    """Run Jo's tracker script with live progress updates."""
     import asyncio
     import subprocess
     import sys
+    import re
 
     completion_marker = "JOSLIST_DONE"
 
@@ -810,45 +592,86 @@ async def cmd_joslist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ /joslist script not found at joslist/stock_tracker.py")
         return
 
-    await update.message.reply_text(
-        "⏳ Running /joslist script now. This can take up to 10 minutes. "
-        "I'll send an update when it finishes."
+    # Count total stocks for progress tracking
+    stocks_file = script_dir / "fullstocks.txt"
+    total_stocks = 0
+    if stocks_file.exists():
+        for line in stocks_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and (line.startswith("HK.") or line.startswith("US.")):
+                total_stocks += 1
+
+    progress_msg = await update.message.reply_text(
+        f"⏳ Running /joslist — 0/{total_stocks} stocks processed..."
     )
 
-    def _run_joslist_script():
-        try:
-            proc = subprocess.run(
-                [sys.executable, str(script_path)],
-                cwd=str(script_dir),
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            return proc, None
-        except Exception as e:
-            return None, str(e)
+    def _run_joslist_stream():
+        """Run script and stream stdout lines back."""
+        proc = subprocess.Popen(
+            [sys.executable, "-u", str(script_path)],
+            cwd=str(script_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return proc
 
     loop = asyncio.get_event_loop()
-    proc, error = await loop.run_in_executor(None, _run_joslist_script)
-
-    if error:
+    try:
+        proc = await loop.run_in_executor(None, _run_joslist_stream)
+    except Exception as e:
         logger.exception("/joslist script failed to start")
-        await update.message.reply_text(f"❌ /joslist script failed to start: {error}")
+        await progress_msg.edit_text(f"❌ /joslist script failed to start: {e}")
         return
 
-    stdout_text = proc.stdout or ""
+    processed = 0
+    last_update_count = 0
+    all_output = []
+    found_marker = False
+    update_interval = max(1, total_stocks // 20)  # update ~20 times
 
-    if proc.returncode == 0 and completion_marker in stdout_text:
-        await update.message.reply_text(
-            "✅ /joslist script finished running.\n"
+    def _read_line():
+        return proc.stdout.readline()
+
+    while True:
+        line = await loop.run_in_executor(None, _read_line)
+        if not line:
+            break
+        all_output.append(line)
+
+        if completion_marker in line:
+            found_marker = True
+
+        # Count "Processing HK.xxxxx..." lines
+        if line.strip().startswith("Processing "):
+            processed += 1
+            if processed - last_update_count >= update_interval:
+                last_update_count = processed
+                pct = int(processed / total_stocks * 100) if total_stocks else 0
+                bar_fill = pct // 5
+                bar = "█" * bar_fill + "░" * (20 - bar_fill)
+                try:
+                    await progress_msg.edit_text(
+                        f"⏳ /joslist — {processed}/{total_stocks} stocks\n"
+                        f"[{bar}] {pct}%"
+                    )
+                except Exception:
+                    pass
+
+    await loop.run_in_executor(None, proc.wait)
+
+    if proc.returncode == 0 and found_marker:
+        await progress_msg.edit_text(
+            f"✅ /joslist finished — {processed}/{total_stocks} stocks processed.\n"
             "📄 Data is available here: "
             "https://docs.google.com/spreadsheets/d/1PiUuP3MNPPHUWVbLNQuPEWgABxa-8NNGiBpGG88EPEI/edit?gid=431873583#gid=431873583"
         )
         return
 
-    if proc.returncode == 0 and completion_marker not in stdout_text:
-        output_tail = "\n".join((proc.stderr or stdout_text or "").splitlines()[-20:])
-        await update.message.reply_text(
+    stdout_text = "".join(all_output)
+    if proc.returncode == 0 and not found_marker:
+        output_tail = "\n".join(stdout_text.splitlines()[-20:])
+        await progress_msg.edit_text(
             "❌ /joslist ended without completion marker, so success was not confirmed.\n"
             "Please check script output/logs and try again."
         )
@@ -856,14 +679,14 @@ async def cmd_joslist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Last output:\n{output_tail}")
         return
 
-    output_tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-20:])
+    output_tail = "\n".join(stdout_text.splitlines()[-20:])
     if output_tail:
-        await update.message.reply_text(
+        await progress_msg.edit_text(
             f"❌ /joslist script failed (exit code {proc.returncode}).\n\n"
             f"Last output:\n{output_tail}"
         )
     else:
-        await update.message.reply_text(
+        await progress_msg.edit_text(
             f"❌ /joslist script failed (exit code {proc.returncode})."
         )
 
@@ -1275,8 +1098,9 @@ async def ccass_got_code(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['ccass_code'] = raw.zfill(5)
     await update.message.reply_text(
         "Choose data source:\n\n"
-        "1️⃣  *HKEX* — official, last 12 months\n"
-        "2️⃣  *Webb-site* — historical, beyond 12 months\n\n"
+        "1️⃣  *HKEX* — official, last 12 months (recommended)\n"
+        "2️⃣  *Webb-site* — historical, beyond 12 months\n"
+        "⚠️ _Webb-site may be blocked (HTTP 403). Use HKEX if unsure._\n\n"
         "Reply *1* or *2*:",
         parse_mode="Markdown",
     )
@@ -1423,6 +1247,45 @@ async def ccass_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def cmd_ipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Fetch recent HK IPOs and write performance to Google Sheets."""
+    await update.message.reply_text("Fetching recent IPOs from Futu...")
+
+    try:
+        a = get_analyzer()
+        rows = fetch_recent_ipos(a.quote_ctx, market=MARKET)
+
+        if not rows:
+            await update.message.reply_text("No recent IPOs found in the last 90 days.")
+            return
+
+        description = (
+            "--- IPO TRACKER ---",
+            "Recent HK IPOs tracked for 90 days after listing.",
+            "Data: Futu 'Recent IPOs' plate + market snapshot + industry plates.",
+            "IPO Price = official offer price if available, otherwise first-day opening price.",
+            f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')} HKT",
+        )
+        url = write_ipo_tracker(rows, "\n".join(description))
+
+        # Count stats
+        with_return = [r for r in rows if isinstance(r.get("Return Since IPO %"), (int, float))]
+        n_up = sum(1 for r in with_return if r["Return Since IPO %"] > 0)
+        n_down = sum(1 for r in with_return if r["Return Since IPO %"] < 0)
+
+        await update.message.reply_text(
+            f"*IPO Tracker* — {len(rows)} recent IPOs\n"
+            f"📈 {n_up} up  📉 {n_down} down since listing\n\n"
+            f"[Open in Google Sheets]({url})",
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+
+    except Exception as e:
+        logger.exception("IPO tracker failed")
+        await update.message.reply_text(f"Error: {e}")
+
+
 async def cmd_monitor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Toggle market monitoring mode on/off."""
     global monitoring_active, monitoring_chat_id
@@ -1452,104 +1315,156 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Market: {MARKET}",
         f"Monitoring: {monitor_str}",
         f"Scan interval: {SCAN_INTERVAL_S // 60} min",
-        f"Tracked stocks: {len(tracked)}",
+        f"Scanner hits: {len(tracked)}",
         f"Last scan: {last_scan_time.strftime('%H:%M:%S') if last_scan_time else 'never'}",
     ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cmd_news(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Check HKEX for material announcements. Optional date arg for backtesting."""
-    # Check for date argument:  /news 18/03/2026  or  /news 2026-03-18
+    """Check HKEX for material announcements. Shows date picker or accepts date arg."""
     date_arg = " ".join(ctx.args).strip() if ctx.args else ""
 
     if date_arg:
-        await update.message.reply_text(f"🔎 Scanning HKEX announcements for *{date_arg}*…", parse_mode="Markdown")
-        try:
-            results = scan_by_date(date_arg)
-            if results:
-                text = format_alerts(results, date_label=date_arg)
-                await update.message.reply_text(
-                    text, parse_mode="Markdown",
-                    disable_web_page_preview=True,
-                )
-                added = add_from_scan_results(results)
-                if added:
-                    await update.message.reply_text(
-                        f"📌 Added {len(added)} stock(s) to Extra Attention watchlist (3-month tracking).",
-                    )
-                await _offer_deal_analysis(update, results)
-            else:
-                await update.message.reply_text(
-                    f"✅ No material announcements found for {date_arg}.\n"
-                    "_Note: only the last ~7 days are available._",
-                    parse_mode="Markdown",
-                )
-        except ValueError as e:
-            await update.message.reply_text(f"❌ {e}")
-        except Exception as e:
-            logger.exception("News scan failed")
-            await update.message.reply_text(f"❌ Scan failed: {e}")
+        # Direct date provided — scan that date
+        await _news_scan_date(update, date_arg)
     else:
-        await update.message.reply_text("🔎 Scanning HKEX announcements…")
+        # No date — show buttons
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Today (last 24h)", callback_data="news|today")],
+            [InlineKeyboardButton("Custom date", callback_data="news|custom")],
+        ])
+        await update.message.reply_text(
+            "*HKEX Announcements*\nWhich date do you want to scan?",
+            reply_markup=keyboard,
+            parse_mode="Markdown",
+        )
+
+
+# State for /news custom date flow
+NEWS_DATE = 990
+
+
+async def news_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle /news inline button press."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+
+    if data == "news|today":
+        await query.edit_message_text("🔎 Scanning HKEX announcements…")
         try:
             results = scan_announcements(since_hours=24.0)
             if results:
                 text = format_alerts(results)
-                await update.message.reply_text(
-                    text, parse_mode="Markdown",
-                    disable_web_page_preview=True,
-                )
+                for i in range(0, len(text), 4000):
+                    chunk = text[i:i + 4000]
+                    await query.message.reply_text(
+                        chunk, parse_mode="Markdown",
+                        disable_web_page_preview=True,
+                    )
                 added = add_from_scan_results(results)
                 if added:
-                    await update.message.reply_text(
-                        f"📌 Added {len(added)} stock(s) to Extra Attention watchlist (3-month tracking).",
+                    await query.message.reply_text(
+                        f"📌 Added {len(added)} stock(s) to Corporate Actions watchlist.",
                     )
-                await _offer_deal_analysis(update, results)
+                await _auto_deal_analysis_from_msg(query.message, results)
             else:
-                await update.message.reply_text(
+                await query.message.reply_text(
                     "✅ No material announcements in the last 24 hours."
                 )
         except Exception as e:
             logger.exception("News scan failed")
-            await update.message.reply_text(f"❌ Scan failed: {e}")
+            await query.message.reply_text(f"❌ Scan failed: {e}")
+
+    elif data == "news|custom":
+        await query.edit_message_text(
+            "📅 Send me a date in one of these formats:\n"
+            "`DD/MM/YYYY`  or  `YYYY-MM-DD`\n\n"
+            "_Note: only the last ~7 days are available._",
+            parse_mode="Markdown",
+        )
+        ctx.user_data["awaiting_news_date"] = True
 
 
-async def _offer_deal_analysis(update: Update, results: list[dict]):
-    """If any original Privatisation/Takeover items exist, offer deep analysis."""
+async def news_date_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handle custom date text after user picks 'Custom date'."""
+    if not ctx.user_data.get("awaiting_news_date"):
+        return
+    ctx.user_data["awaiting_news_date"] = False
+    date_arg = update.message.text.strip()
+    await _news_scan_date(update, date_arg)
+
+
+async def _news_scan_date(update, date_arg: str):
+    """Scan HKEX announcements for a specific date."""
+    msg = update.message if hasattr(update, 'message') and update.message else update
+    await msg.reply_text(f"🔎 Scanning HKEX announcements for *{date_arg}*…", parse_mode="Markdown")
+    try:
+        results = scan_by_date(date_arg)
+        if results:
+            text = format_alerts(results, date_label=date_arg)
+            for i in range(0, len(text), 4000):
+                chunk = text[i:i + 4000]
+                await msg.reply_text(
+                    chunk, parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
+            added = add_from_scan_results(results)
+            if added:
+                await msg.reply_text(
+                    f"📌 Added {len(added)} stock(s) to Corporate Actions watchlist.",
+                )
+            await _auto_deal_analysis_from_msg(msg, results)
+        else:
+            await msg.reply_text(
+                f"✅ No material announcements found for {date_arg}.\n"
+                "_Note: only the last ~7 days are available._",
+                parse_mode="Markdown",
+            )
+    except ValueError as e:
+        await msg.reply_text(f"❌ {e}")
+    except Exception as e:
+        logger.exception("News scan failed")
+        await msg.reply_text(f"❌ Scan failed: {e}")
+
+
+async def _auto_deal_analysis_from_msg(message, results: list[dict]):
+    """Auto-run deal analysis for Privatisation/Takeover/M&A items."""
     deal_items = [
         r for r in results
         if r.get("is_original", True)
-        and r.get("category") in ("Privatisation", "Takeover")
+        and r.get("category") in ("Privatisation", "Takeover", "M&A")
     ]
     if not deal_items:
         return
 
-    buttons = []
     for item in deal_items:
-        code = item["stock_code"]
-        name = item["stock_name"]
-        label = f"🔍 {code} {name} — {item['category']}"
-        # Store deal info in callback_data as code|name|link|title (truncated)
-        cb_data = f"deal|{code}|{name}|{item.get('link', '')}|{item.get('title', '')[:80]}"
-        # Telegram limits callback_data to 64 bytes — use news_id instead
-        cb_data = f"deal|{item.get('news_id', '')}"
-        buttons.append([InlineKeyboardButton(label, callback_data=cb_data)])
-
-    # Store deal items in bot_data so callback can retrieve full info
-    bot_data = update.get_bot().callback_data if hasattr(update.get_bot(), 'callback_data') else None
-    # Use application-level storage via context — store on the message
-    # We'll store in a module-level dict keyed by news_id
-    for item in deal_items:
-        _pending_deals[item.get("news_id", "")] = item
-
-    keyboard = InlineKeyboardMarkup(buttons)
-    await update.message.reply_text(
-        "⚠️ *Privatisation / Takeover detected!*\n"
-        "Want detailed buyer & seller analysis?",
-        reply_markup=keyboard,
-        parse_mode="Markdown",
-    )
+        code = item.get("stock_code", "")
+        name = item.get("stock_name", "")
+        cat = item.get("category", "")
+        try:
+            await message.reply_text(
+                f"🔎 Auto-analysing deal: `{code}` *{name}* ({cat})…",
+                parse_mode="Markdown",
+            )
+            analysis = analyze_deal(
+                title=item.get("title", ""),
+                stock_code=code,
+                stock_name=name,
+                link=item.get("link", ""),
+            )
+            if analysis:
+                for i in range(0, len(analysis), 4000):
+                    await message.reply_text(
+                        analysis[i:i + 4000],
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True,
+                    )
+            else:
+                await message.reply_text(f"❌ Deal analysis failed for {code} {name}.")
+        except Exception as e:
+            logger.warning("Auto deal analysis failed for %s: %s", code, e)
 
 
 # Module-level cache for pending deal analysis requests
@@ -1604,36 +1519,32 @@ async def deal_analysis_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    monitor_str = "🟢 ON" if monitoring_active else "🔴 OFF"
+    monitor_str = "ON" if monitoring_active else "OFF"
     text = (
         "*Commands*\n"
         "\n"
-        "*📊 Scanning*\n"
-        "/scan — Intraday movers (no overnight gap)\n"
-        "/gapup — Overnight gap-up scan\n"
-        "/joslist — Run Jo's tracker script (up to 10 min)\n"
-        "/joadd CODE — Add stock to Jo list under Manual Addition\n"
-        "/joremove CODE — Remove stock from Jo list\n"
-        "/tracked — Flagged stocks (Excel report)\n"
+        "*Scan & Monitor*\n"
+        "/scan — Market scan (intraday + gap-up)\n"
+        "/monitor — Toggle auto-scan (" + monitor_str + ")\n"
+        "\n"
+        "*Lists (Google Sheets)*\n"
+        "/corpactions — HKEX corporate actions (90-day)\n"
+        "/ipo — Recent IPOs performance (90-day)\n"
+        "\n"
+        "*News & Research*\n"
+        "/news — HKEX announcements (today or custom date)\n"
         "/debug — Score breakdown for any stock\n"
-        "\n"
-        "*📢 Announcements*\n"
-        "/news — HKEX filings (halts, placements, M&A…)\n"
-        "/news DD/MM/YYYY — Check a specific date\n"
-        "/attention — Extra Attention watchlist (3-month)\n"
-        "\n"
-        "*📋 CCASS*\n"
         "/ccass — CCASS shareholding report\n"
+        "/chat — AI stock analyst\n"
         "\n"
-        f"*🔍 Monitoring ({monitor_str})*\n"
-        "/monitor — Toggle market monitoring on/off\n"
+        "*Jo's Tracker*\n"
+        "/joslist — Run Jo's tracker script\n"
+        "/joadd CODE — Add stock to Jo's list\n"
+        "/joremove CODE — Remove from Jo's list\n"
         "\n"
-        "*💬 AI Chat*\n"
-        "/chat — Ask anything in natural language\n"
-        "\n"
-        "*ℹ️ Info*\n"
+        "*Info*\n"
         "/status — Bot status\n"
-        "/algo — How the scoring algorithm works\n"
+        "/algo — How scoring works\n"
         "/help — This message"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -1733,7 +1644,7 @@ CHAT_MSG = 0  # ConversationHandler state
 
 CHAT_SYSTEM_PROMPT = """\
 You are an expert Hong Kong stock market analyst assistant embedded in a \
-Telegram trading bot.
+Telegram trading bot called Odysseus.
 
 You have deep knowledge of:
 - HKEX listed companies, corporate actions (rights issues, placements, \
@@ -1742,6 +1653,19 @@ privatisations, takeovers, M&A, trading halts)
 - Technical analysis, market microstructure, CCASS shareholding patterns
 - How to interpret HKEX filings and announcements
 
+The bot you live in has these capabilities:
+- /scan — scans the HK market for gap-up stocks and intraday movers, scores them
+- /news — scans HKEX announcements for corporate actions (halts, takeovers, M&A, etc.)
+- /corpactions — shows stocks on the Corporate Actions watchlist (auto-tracked for 90 days)
+- /ipo — tracks recent IPO performance
+- /joslist — runs a portfolio tracker that updates Google Sheets with price data
+- /ccass — tracks CCASS shareholding changes (institutional flow)
+- /monitor — toggles automatic scanning every 30 min during market hours
+
+The bot automatically analyses M&A/Takeover/Privatisation deals when detected.
+Stocks flagged from announcements are added to an "Extra Attention" watchlist \
+and monitored for ≥3% intraday moves.
+
 The user is a trader/investor monitoring HK stocks. Answer concisely and \
 directly. Use bullet points where helpful. If you reference specific stocks, \
 include the stock code.
@@ -1749,6 +1673,43 @@ include the stock code.
 Keep responses focused and actionable. Avoid disclaimers about not being \
 financial advice unless explicitly asked.
 """
+
+
+def _build_chat_context() -> str:
+    """Build live bot state context for chat mode."""
+    import json
+    context_parts = []
+
+    # Tracked movers
+    tracked_file = Path(__file__).resolve().parent.parent / "data" / "tracked_movers.json"
+    if tracked_file.exists():
+        try:
+            tracked = json.loads(tracked_file.read_text())
+            if tracked:
+                lines = ["Currently tracked scanner hits:"]
+                for code, info in list(tracked.items())[:30]:  # limit to 30
+                    name = info.get("name", "")
+                    entry_price = info.get("entry_price", "")
+                    date = info.get("date", "")[:10]
+                    lines.append(f"- {code} {name}: entry ${entry_price} on {date}")
+                context_parts.append("\n".join(lines))
+        except Exception:
+            pass
+
+    # Attention watchlist
+    attention = get_attention_stocks()
+    if attention:
+        lines = ["Corporate Actions watchlist (Extra Attention):"]
+        for code, info in attention.items():
+            key_info = info.get("key_info", "")
+            lines.append(
+                f"- {info['stock_code']} {info['stock_name']}: "
+                f"{info['category']}"
+                + (f" — {key_info[:100]}" if key_info else "")
+            )
+        context_parts.append("\n".join(lines))
+
+    return "\n\n".join(context_parts) if context_parts else ""
 
 
 async def cmd_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1766,17 +1727,11 @@ async def cmd_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         {"role": "system", "content": CHAT_SYSTEM_PROMPT},
     ]
 
-    # Include attention list context if any
-    attention = get_attention_stocks()
-    if attention:
-        stocks_ctx = "Current Extra Attention watchlist:\n"
-        for code, info in attention.items():
-            stocks_ctx += (
-                f"- {info['stock_code']} {info['stock_name']}: "
-                f"{info['category']} — {info.get('key_info', 'N/A')}\n"
-            )
+    # Include live bot state as context
+    live_ctx = _build_chat_context()
+    if live_ctx:
         ctx.user_data["chat_history"].append(
-            {"role": "system", "content": stocks_ctx}
+            {"role": "system", "content": live_ctx}
         )
 
     await update.message.reply_text(
@@ -1940,14 +1895,14 @@ async def _check_attention_stocks(ctx, analyzer):
         )
 
 
-async def cmd_attention(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Show all stocks on the Extra Attention watchlist."""
+async def cmd_corp_actions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Show all stocks on the Corporate Actions watchlist + sync to Google Sheets."""
     attention = get_attention_stocks()
     if not attention:
-        await update.message.reply_text("📋 Extra Attention watchlist is empty.")
+        await update.message.reply_text("No corporate actions being tracked.")
         return
 
-    lines = ["📋 *Extra Attention Watchlist*", ""]
+    lines = ["*Corporate Actions*", ""]
     emojis = {
         "Trading Halt": "🔴", "Trading Resumption": "🟢",
         "Rights Issue": "💰", "Share Placement": "📊",
@@ -1961,14 +1916,35 @@ async def cmd_attention(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         expires = info.get("expires", "")[:10]
         key_info = info.get("key_info", "")
 
+        link = info.get("link", "")
         lines.append(f"{emoji} `{info['stock_code']}` *{info['stock_name']}*")
         lines.append(f"  Type: {cat}")
         if key_info:
             lines.append(f"  💡 _{key_info[:80]}_")
         lines.append(f"  Added: {added} → Expires: {expires}")
+        if link:
+            lines.append(f"  [Announcement]({link})")
         lines.append("")
 
     lines.append(f"_Total: {len(attention)} stocks tracked for 3 months_")
+
+    # Sync to Google Sheets
+    try:
+        sheet_rows = [
+            {"Code": code, "Name": info.get("stock_name", ""),
+             "Category": info.get("category", ""),
+             "Key Info": info.get("key_info", "")[:120],
+             "Added": info.get("added", "")[:10],
+             "Expires": info.get("expires", "")[:10],
+             "Announcement": info.get("link", "")}
+            for code, info in sorted(attention.items())
+        ]
+        desc = "Stocks flagged from HKEX announcements. Auto-added by /news. Retained 90 days."
+        url = write_corporate_actions(sheet_rows, desc)
+        lines.append(f"\n[Open in Google Sheets]({url})")
+    except Exception as e:
+        logger.warning("Google Sheets sync failed: %s", e)
+
     await update.message.reply_text(
         "\n".join(lines), parse_mode="Markdown",
         disable_web_page_preview=True,
@@ -2037,24 +2013,34 @@ async def scheduled_scan(ctx: ContextTypes.DEFAULT_TYPE):
 
         last_scan_time = datetime.now()
 
-        # Only send Excel if there are alerts worth reporting
         target_chat = monitoring_chat_id or CHAT_ID
+
+        # Send top 2 alerts to Telegram
         if all_alerts and target_chat:
-            tracked_rows = _get_tracked_gainers(a, MARKET)
-            buf = _build_scan_excel(all_alerts, all_watches, tracked_rows,
-                                    scan_type="intraday")
-            fname = f"AutoScan_{now_hkt.strftime('%H%M')}.xlsx"
-            summary = (
-                f"🤖 *Auto-Scan*\n"
-                f"🔥 {len(all_alerts)} alerts  |  📊 {len(all_watches)} watch\n"
-                f"📡 {len(tracked_rows)} tracked gainers"
-            )
-            await ctx.bot.send_message(chat_id=target_chat, text=summary,
-                                       parse_mode="Markdown")
-            import io
-            await ctx.bot.send_document(chat_id=target_chat, document=buf,
-                                        filename=fname,
-                                        caption="Automated scan results")
+            top_alerts = sorted(all_alerts, key=lambda x: x[1].get("score", 0), reverse=True)[:2]
+            for row, result in top_alerts:
+                trigger = result.get("trigger", "gap_up")
+                if trigger == "gap_up":
+                    msg = build_telegram_message(row, result)
+                else:
+                    msg = build_intraday_message(row, result)
+                await ctx.bot.send_message(chat_id=target_chat, text=msg,
+                                           parse_mode="Markdown")
+
+        # Sync all results to Google Sheets
+        try:
+            result_info = _sync_scanner_hits_to_sheets(a)
+            if result_info and target_chat:
+                url, sheet_rows = result_info
+                await ctx.bot.send_message(
+                    chat_id=target_chat,
+                    text=f"🤖 *Auto-Scan* — {len(all_alerts)} alerts, {len(all_watches)} watch\n"
+                         f"[Full results in Google Sheets]({url})",
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
+        except Exception as e:
+            logger.warning("Auto-scan Sheets sync failed: %s", e)
 
         logger.info("Scheduled scan: %d alerts, %d watches",
                     len(all_alerts), len(all_watches))
@@ -2078,19 +2064,20 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("scan", cmd_scan))
-    app.add_handler(CommandHandler("gapup", cmd_gapup))
     app.add_handler(CommandHandler("joslist", cmd_joslist))
     app.add_handler(CommandHandler("joadd", cmd_joadd))
     app.add_handler(CommandHandler("joremove", cmd_joremove))
-    app.add_handler(CommandHandler("tracked", cmd_tracked))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("algo", cmd_algo))
     app.add_handler(CommandHandler("start", cmd_help))
     app.add_handler(CommandHandler("news", cmd_news))
-    app.add_handler(CommandHandler("attention", cmd_attention))
+    app.add_handler(CommandHandler("corpactions", cmd_corp_actions))
+    app.add_handler(CommandHandler("ipo", cmd_ipo))
     app.add_handler(CallbackQueryHandler(deal_analysis_callback, pattern=r"^deal\|"))
+    app.add_handler(CallbackQueryHandler(news_callback, pattern=r"^news\|"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, news_date_handler), group=1)
 
     # Debug conversation handler
     debug_conv = ConversationHandler(
@@ -2145,7 +2132,7 @@ def main():
 
     # Schedule HKEX announcement checks at 9:15 AM and 4:15 PM HKT daily
     async def scheduled_news_check(context: ContextTypes.DEFAULT_TYPE):
-        """Fetch HKEX announcements and send alerts if any match."""
+        """Fetch HKEX announcements, auto-analyse deals, sync to Sheets."""
         news_chat = monitoring_chat_id or CHAT_ID
         if not news_chat:
             return
@@ -2153,34 +2140,15 @@ def main():
             results = scan_announcements(since_hours=18.0)
             if results:
                 text = format_alerts(results)
-                await context.bot.send_message(
-                    chat_id=news_chat, text=text,
-                    parse_mode="Markdown",
-                    disable_web_page_preview=True,
-                )
-                # Offer deal analysis for Privatisation/Takeover
-                deal_items = [
-                    r for r in results
-                    if r.get("is_original", True)
-                    and r.get("category") in ("Privatisation", "Takeover")
-                ]
-                if deal_items:
-                    buttons = []
-                    for item in deal_items:
-                        code = item["stock_code"]
-                        name = item["stock_name"]
-                        label = f"🔍 {code} {name} — {item['category']}"
-                        cb_data = f"deal|{item.get('news_id', '')}"
-                        buttons.append([InlineKeyboardButton(label, callback_data=cb_data)])
-                        _pending_deals[item.get("news_id", "")] = item
-                    keyboard = InlineKeyboardMarkup(buttons)
+                # Split long messages (Telegram 4096 char limit)
+                for i in range(0, len(text), 4000):
+                    chunk = text[i:i + 4000]
                     await context.bot.send_message(
-                        chat_id=news_chat,
-                        text="⚠️ *Privatisation / Takeover detected!*\n"
-                             "Want detailed buyer & seller analysis?",
-                        reply_markup=keyboard,
+                        chat_id=news_chat, text=chunk,
                         parse_mode="Markdown",
+                        disable_web_page_preview=True,
                     )
+
                 # Auto-add to Extra Attention watchlist
                 added = add_from_scan_results(results)
                 if added:
@@ -2188,11 +2156,108 @@ def main():
                         chat_id=news_chat,
                         text=f"📌 Added {len(added)} stock(s) to Extra Attention watchlist (3-month tracking).",
                     )
+
+                # Auto-run deal analysis for Privatisation/Takeover/M&A
+                deal_items = [
+                    r for r in results
+                    if r.get("is_original", True)
+                    and r.get("category") in ("Privatisation", "Takeover", "M&A")
+                ]
+                for item in deal_items:
+                    code = item.get("stock_code", "")
+                    name = item.get("stock_name", "")
+                    cat = item.get("category", "")
+                    try:
+                        await context.bot.send_message(
+                            chat_id=news_chat,
+                            text=f"🔎 Auto-analysing deal: `{code}` *{name}* ({cat})…",
+                            parse_mode="Markdown",
+                        )
+                        analysis = analyze_deal(
+                            title=item.get("title", ""),
+                            stock_code=code,
+                            stock_name=name,
+                            link=item.get("link", ""),
+                        )
+                        if analysis:
+                            for i in range(0, len(analysis), 4000):
+                                await context.bot.send_message(
+                                    chat_id=news_chat, text=analysis[i:i + 4000],
+                                    parse_mode="Markdown",
+                                    disable_web_page_preview=True,
+                                )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=news_chat,
+                                text=f"❌ Deal analysis failed for {code} {name}.",
+                            )
+                    except Exception as e:
+                        logger.warning("Auto deal analysis failed for %s: %s", code, e)
+
                 logger.info("Announcement alert sent: %d items", len(results))
             else:
                 logger.info("Announcement scan: nothing new")
+
+            # Auto-sync Corporate Actions watchlist to Google Sheets
+            try:
+                attention = get_attention_stocks()
+                if attention:
+                    sheet_rows = [
+                        {"Code": code, "Name": info.get("stock_name", ""),
+                         "Category": info.get("category", ""),
+                         "Key Info": info.get("key_info", "")[:120],
+                         "Added": info.get("added", "")[:10],
+                         "Expires": info.get("expires", "")[:10],
+                         "Announcement": info.get("link", "")}
+                        for code, info in sorted(attention.items())
+                    ]
+                    write_corporate_actions(sheet_rows,
+                        "Stocks flagged from HKEX announcements. Auto-synced. Retained 90 days.")
+                    logger.info("Corporate Actions auto-synced to Google Sheets: %d rows", len(sheet_rows))
+            except Exception as e:
+                logger.warning("Corporate Actions auto-sync to Sheets failed: %s", e)
+
         except Exception as e:
             logger.exception("Scheduled announcement check failed")
+
+    async def scheduled_afternoon_check(context: ContextTypes.DEFAULT_TYPE):
+        """Afternoon: announcement check + IPO scan to Google Sheets."""
+        # Run the standard announcement check first
+        await scheduled_news_check(context)
+
+        # Then scan IPOs and sync to Google Sheets
+        news_chat = monitoring_chat_id or CHAT_ID
+        try:
+            a = get_analyzer()
+            rows = fetch_recent_ipos(a.quote_ctx, market=MARKET)
+            if rows:
+                description = (
+                    "--- IPO TRACKER ---",
+                    "Recent HK IPOs tracked for 90 days after listing.",
+                    "Data: Futu 'Recent IPOs' plate + market snapshot + industry plates.",
+                    "IPO Price = official offer price if available, otherwise first-day opening price.",
+                    f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')} HKT",
+                )
+                url = write_ipo_tracker(rows, "\n".join(description))
+
+                with_return = [r for r in rows if isinstance(r.get("Return Since IPO %"), (int, float))]
+                n_up = sum(1 for r in with_return if r["Return Since IPO %"] > 0)
+                n_down = sum(1 for r in with_return if r["Return Since IPO %"] < 0)
+
+                if news_chat:
+                    await context.bot.send_message(
+                        chat_id=news_chat,
+                        text=f"📋 *IPO Tracker updated* — {len(rows)} recent IPOs\n"
+                             f"📈 {n_up} up  📉 {n_down} down since listing\n\n"
+                             f"[Open in Google Sheets]({url})",
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True,
+                    )
+                logger.info("IPO tracker auto-synced: %d IPOs", len(rows))
+            else:
+                logger.info("IPO scan: no recent IPOs found")
+        except Exception as e:
+            logger.warning("Scheduled IPO scan failed: %s", e)
 
     app.job_queue.run_daily(
         scheduled_news_check,
@@ -2200,7 +2265,7 @@ def main():
         name="news_morning",
     )
     app.job_queue.run_daily(
-        scheduled_news_check,
+        scheduled_afternoon_check,
         time=dt_time(hour=16, minute=15, tzinfo=hkt),
         name="news_afternoon",
     )
