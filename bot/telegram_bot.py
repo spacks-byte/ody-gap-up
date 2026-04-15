@@ -83,7 +83,6 @@ logger = logging.getLogger(__name__)
 analyzer: TopGainersAnalyzer | None = None
 last_scan_time: datetime | None = None
 monitoring_active: bool = False
-monitoring_chat_id: str = ""  # chat where /monitor was activated
 _eod_saved_date = None  # tracks whether we've saved today's EOD turnover
 
 
@@ -1288,10 +1287,9 @@ async def cmd_ipo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_monitor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Toggle market monitoring mode on/off."""
-    global monitoring_active, monitoring_chat_id
+    global monitoring_active
     monitoring_active = not monitoring_active
     if monitoring_active:
-        monitoring_chat_id = str(update.effective_chat.id)
         await update.message.reply_text(
             "🟢 *Market Monitoring ON*\n\n"
             f"Scanning {MARKET} every {SCAN_INTERVAL_S // 60} min during trading hours.\n"
@@ -1822,7 +1820,7 @@ ATTENTION_COOLDOWN_S = 600  # 10 minutes
 
 async def _check_attention_stocks(ctx, analyzer):
     """Check extra attention stocks for significant movement and alert."""
-    target_chat = monitoring_chat_id or CHAT_ID
+    target_chat = CHAT_ID
     if not target_chat:
         return
 
@@ -2013,7 +2011,7 @@ async def scheduled_scan(ctx: ContextTypes.DEFAULT_TYPE):
 
         last_scan_time = datetime.now()
 
-        target_chat = monitoring_chat_id or CHAT_ID
+        target_chat = CHAT_ID
 
         # Send top 2 alerts to Telegram
         if all_alerts and target_chat:
@@ -2133,7 +2131,7 @@ def main():
     # Schedule HKEX announcement checks at 9:15 AM and 4:15 PM HKT daily
     async def scheduled_news_check(context: ContextTypes.DEFAULT_TYPE):
         """Fetch HKEX announcements, auto-analyse deals, sync to Sheets."""
-        news_chat = monitoring_chat_id or CHAT_ID
+        news_chat = CHAT_ID
         if not news_chat:
             return
         try:
@@ -2226,7 +2224,7 @@ def main():
         await scheduled_news_check(context)
 
         # Then scan IPOs and sync to Google Sheets
-        news_chat = monitoring_chat_id or CHAT_ID
+        news_chat = CHAT_ID
         try:
             a = get_analyzer()
             rows = fetch_recent_ipos(a.quote_ctx, market=MARKET)
