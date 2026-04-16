@@ -84,6 +84,7 @@ analyzer: TopGainersAnalyzer | None = None
 last_scan_time: datetime | None = None
 monitoring_active: bool = True  # ON by default so scheduled scans run after restart
 _eod_saved_date = None  # tracks whether we've saved today's EOD turnover
+_silent_scan_count: int = 0  # consecutive scans with 0 alerts — for heartbeat
 
 
 def get_analyzer() -> TopGainersAnalyzer:
@@ -2039,6 +2040,22 @@ async def scheduled_scan(ctx: ContextTypes.DEFAULT_TYPE):
                 )
         except Exception as e:
             logger.warning("Auto-scan Sheets sync failed: %s", e)
+
+        # ── Heartbeat: let user know monitoring is alive on quiet days ──
+        global _silent_scan_count
+        if not all_alerts and not all_watches:
+            _silent_scan_count += 1
+            # Send a heartbeat every 6th quiet scan (~30 min at 5-min interval)
+            if _silent_scan_count % 6 == 0 and target_chat:
+                time_str = now_hkt.strftime("%H:%M")
+                await ctx.bot.send_message(
+                    chat_id=target_chat,
+                    text=f"🫀 *Heartbeat* — {time_str} HKT\n"
+                         f"Scan complete, nothing noteworthy.",
+                    parse_mode="Markdown",
+                )
+        else:
+            _silent_scan_count = 0
 
         logger.info("Scheduled scan: %d alerts, %d watches",
                     len(all_alerts), len(all_watches))
