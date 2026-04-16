@@ -2122,10 +2122,22 @@ def main():
         time=dt_time(hour=9, minute=15, tzinfo=hkt),
         name="scan_morning",
     )
+    # If the bot starts after 09:20 HKT, use a short delay so monitoring
+    # begins immediately instead of waiting until 09:20 the next day.
+    _now_hkt = datetime.now(timezone.utc) + timedelta(hours=8)
+    _start_time = dt_time(hour=9, minute=20, tzinfo=hkt)
+    _today_start = _now_hkt.replace(
+        hour=_start_time.hour, minute=_start_time.minute, second=0, microsecond=0,
+    )
+    if _now_hkt.time().replace(tzinfo=hkt) > _start_time:
+        _first = 10  # seconds — start almost immediately
+    else:
+        _first = _start_time  # schedule for 09:20 today
+
     app.job_queue.run_repeating(
         scheduled_scan,
         interval=SCAN_INTERVAL_S,
-        first=dt_time(hour=9, minute=20, tzinfo=hkt),
+        first=_first,
     )
 
     # Schedule HKEX announcement checks at 9:15 AM and 4:15 PM HKT daily

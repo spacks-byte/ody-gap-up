@@ -871,6 +871,7 @@ class TopGainersAnalyzer:
         alerts, watches = [], []
         for _, row in candidates.iterrows():
             result = score_intraday(row, market=market)
+            result['trigger'] = 'intraday'
             if result['alert_tier'] == 'alert':
                 alerts.append((row, result))
             elif result['alert_tier'] == 'watch':
