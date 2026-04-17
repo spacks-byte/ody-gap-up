@@ -1305,6 +1305,17 @@ async def cmd_monitor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def cmd_chatid(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Reply with the chat ID of the current chat (useful for .env setup)."""
+    chat = update.effective_chat
+    await update.message.reply_text(
+        f"Chat ID: `{chat.id}`\n"
+        f"Type: {chat.type}\n"
+        f"Title: {chat.title or 'N/A'}",
+        parse_mode="Markdown",
+    )
+
+
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Report bot status."""
     tracked = get_analyzer().load_tracked_stocks()
@@ -2083,6 +2094,7 @@ def main():
     app.add_handler(CommandHandler("joadd", cmd_joadd))
     app.add_handler(CommandHandler("joremove", cmd_joremove))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
+    app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("algo", cmd_algo))
