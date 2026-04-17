@@ -64,10 +64,10 @@ from hkex.ipo_tracker import fetch_recent_ipos
 # ── Config ──────────────────────────────────────────────────────────────────────
 
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-1003478831278")  # Ody bot GC
 FUTU_HOST = os.environ.get("FUTU_HOST", "127.0.0.1")
 FUTU_PORT = int(os.environ.get("FUTU_PORT", "11111"))
-SCAN_INTERVAL_S = int(os.environ.get("SCAN_INTERVAL", "300"))  # 5 min default
+SCAN_INTERVAL_S = int(os.environ.get("SCAN_INTERVAL", "1800"))  # 30 min default
 MARKET = os.environ.get("MARKET", "HK")
 JOSLIST_FILE = Path(__file__).resolve().parent.parent / "joslist" / "fullstocks.txt"
 JOSLIST_MANUAL_HEADING = "# Manual Addition"
