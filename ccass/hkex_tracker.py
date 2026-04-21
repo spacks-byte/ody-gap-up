@@ -264,12 +264,26 @@ class HKEXCCASSTracker:
                     percentage_div = cols[4].find('div', class_='mobile-list-body') if len(cols) > 4 else None
                     
                     if participant_id_div:
+                        shareholding_raw = shareholding_div.get_text(strip=True) if shareholding_div else ''
+                        shareholding_clean = shareholding_raw.replace(',', '').strip()
+                        try:
+                            shareholding_val = int(shareholding_clean) if shareholding_clean and shareholding_clean.replace('-', '').replace('.', '').isdigit() else 0
+                        except (ValueError, AttributeError):
+                            shareholding_val = 0
+
+                        percentage_raw = percentage_div.get_text(strip=True) if percentage_div else ''
+                        percentage_clean = percentage_raw.replace('%', '').strip()
+                        try:
+                            percentage_val = float(percentage_clean) if percentage_clean else 0.0
+                        except (ValueError, AttributeError):
+                            percentage_val = 0.0
+
                         participant_data = {
                             'participant_id': participant_id_div.get_text(strip=True),
                             'participant_name': participant_name_div.get_text(strip=True) if participant_name_div else '',
                             'address': cols[2].find('div', class_='mobile-list-body').get_text(strip=True) if len(cols) > 2 and cols[2].find('div', class_='mobile-list-body') else '',
-                            'shareholding': shareholding_div.get_text(strip=True) if shareholding_div else '',
-                            'percentage': percentage_div.get_text(strip=True) if percentage_div else ''
+                            'shareholding': shareholding_val,
+                            'percentage': percentage_val
                         }
                         result['participants'].append(participant_data)
         
@@ -322,7 +336,7 @@ class HKEXCCASSTracker:
             
             # Calculate total shareholding if possible
             try:
-                total_shares = sum([int(p['shareholding'].replace(',', '')) for p in data['participants']])
+                total_shares = sum([int(p['shareholding']) if isinstance(p['shareholding'], (int, float)) else int(str(p['shareholding']).replace(',', '') or 0) for p in data['participants']])
                 print(f"Total Shares Held: {total_shares:,}")
             except:
                 pass
