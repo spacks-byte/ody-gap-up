@@ -29,6 +29,27 @@ import time
 
 # ─── Utility ────────────────────────────────────────────────────────────────────
 
+def _normalize_participants(data: dict) -> None:
+    """Ensure 'shareholding' is int and 'percentage' is float (for legacy cache data)."""
+    if not data or 'participants' not in data:
+        return
+    for p in data['participants']:
+        s = p.get('shareholding', 0)
+        if isinstance(s, str):
+            cleaned = s.replace(',', '').strip()
+            try:
+                p['shareholding'] = int(cleaned) if cleaned and cleaned.replace('-', '').replace('.', '').isdigit() else 0
+            except (ValueError, AttributeError):
+                p['shareholding'] = 0
+        pct = p.get('percentage', 0)
+        if isinstance(pct, str):
+            cleaned = pct.replace('%', '').strip()
+            try:
+                p['percentage'] = float(cleaned) if cleaned else 0.0
+            except (ValueError, AttributeError):
+                p['percentage'] = 0.0
+
+
 def timing_decorator(func):
     """Decorator to measure function execution time"""
     @wraps(func)
@@ -410,6 +431,7 @@ class CachedHKEXTracker(HKEXCCASSTracker):
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
+                    _normalize_participants(data)
                     if self.enable_timing:
                         print(f"📦 Loaded from cache: {cache_path.name}")
                     return data
